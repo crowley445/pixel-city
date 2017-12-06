@@ -9,6 +9,8 @@
 import UIKit
 import MapKit
 import CoreLocation
+import Alamofire
+import AlamofireImage
 
 class MapVC: UIViewController, UIGestureRecognizerDelegate {
 
@@ -26,6 +28,9 @@ class MapVC: UIViewController, UIGestureRecognizerDelegate {
     var collectionView: UICollectionView?
     var flowLayout = UICollectionViewFlowLayout()
     
+    var imageUrls = [String]()
+    var images = [UIImage]()
+    
     override func viewDidLoad() {
         super.viewDidLoad()
         mapView.delegate = self
@@ -34,8 +39,14 @@ class MapVC: UIViewController, UIGestureRecognizerDelegate {
         addDoubleTap()
         addSwipe()
         addCollectionView()
+        
+        registerForPreviewing(with: self, sourceView: collectionView!)
     }
-    
+
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        return .portrait
+    }
+
     func addDoubleTap () {
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(dropPin(sender:)))
         doubleTap.numberOfTapsRequired = 2
@@ -64,15 +75,22 @@ class MapVC: UIViewController, UIGestureRecognizerDelegate {
         progressLabel?.font = UIFont(name: "Avenir Next", size: 18)
         progressLabel?.textColor = UIColor.darkGray
         progressLabel?.textAlignment = .center
-        progressLabel?.text = "12/40 PHOTOS LOADED"
         collectionView?.addSubview(progressLabel!)
     }
     
     func addCollectionView() {
+        
+        let itemSize = (UIScreen.main.bounds.width / 3)
+        flowLayout.sectionInset = UIEdgeInsetsMake(0, 0, itemSize * 2.5, 0)
+        flowLayout.itemSize = CGSize(width: itemSize, height: itemSize)
+        flowLayout.minimumInteritemSpacing = 0
+        flowLayout.minimumLineSpacing = 0
+        
         collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: flowLayout)
         collectionView?.register(PhotoCell.self, forCellWithReuseIdentifier: "photoCell")
         collectionView?.delegate = self
         collectionView?.dataSource = self
+        collectionView?.backgroundColor = UIColor.white
         pullUpView.addSubview(collectionView!)
     }
     
@@ -96,6 +114,7 @@ class MapVC: UIViewController, UIGestureRecognizerDelegate {
     }
     
     @objc func animateViewDown () {
+        cancelAllSessions()
         pullUpViewHeightConstraint.constant = 1
         UIView.animate(withDuration: 0.3) {
             self.view.layoutIfNeeded()
@@ -134,6 +153,10 @@ extension MapVC : MKMapViewDelegate {
         mapView.removeAnnotations(mapView.annotations)
         removeSpinner()
         removeLabel()
+        cancelAllSessions()
+
+        images.removeAll()
+        collectionView?.reloadData()
         
         animateViewUp()
         addSwipe()
@@ -146,6 +169,16 @@ extension MapVC : MKMapViewDelegate {
         let droppablePin = DroppablePin(coordinate: touchCoordinates, identifier: "droppablePin")
         mapView.addAnnotation(droppablePin)
         
+        self.retrieveUrls(withAnnotaion: droppablePin) { (urlArray) in
+            self.downloadImages(urlArray: urlArray, completion: { (success) in
+                if success {
+                    self.removeSpinner()
+                    self.removeLabel()
+                    self.collectionView?.reloadData()
+                    self.collectionView?.layoutIfNeeded()
+                }
+            })
+        }
         centerMapOnLocation(withCoordinates: touchCoordinates)
     }
 }
@@ -166,6 +199,13 @@ extension MapVC: UICollectionViewDelegate, UICollectionViewDataSource {
     
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         if let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "photoCell", for: indexPath) as? PhotoCell {
+            
+            let imageView = UIImageView(image: images[indexPath.row])
+            imageView.frame.size = cell.frame.size
+            imageView.contentMode = .scaleAspectFill
+            imageView.clipsToBounds = true
+            cell.addSubview(imageView)
+            
             return cell
         }
         return PhotoCell()
@@ -176,7 +216,78 @@ extension MapVC: UICollectionViewDelegate, UICollectionViewDataSource {
     }
     
     func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-        return 4
+        return images.count
+    }
+    
+    func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        let photoVC = PhotoVC()
+        photoVC.initData(withImage: images[indexPath.row])
+        photoVC.modalPresentationStyle = .custom
+        present(photoVC, animated: true, completion: nil)
+    }
+    
+}
+
+extension MapVC {
+    
+    func retrieveUrls(withAnnotaion annotation: DroppablePin, completion: @escaping (_ completion: [String]) -> ()) {
+        
+        Alamofire.request(flickrURL(withAnnotaion: annotation, andNumberOfPhotos: 40)).responseJSON { (response) in
+            
+            guard let json = response.result.value as? Dictionary<String, Any> else { return }
+            guard let photos = (json["photos"] as? Dictionary<String, Any>)?["photo"] as? [Dictionary<String, Any>] else { return }
+            var imageUrlArray = [String]()
+            for photo in photos {
+                let url = "https://farm\(photo["farm"]!).staticflickr.com/\(photo["server"]!)/\(photo["id"]!)_\(photo["secret"]!).jpg"
+                imageUrlArray.append(url)
+            }
+            completion(imageUrlArray)
+        }
+    }
+    
+    func downloadImages(urlArray: [String], completion: @escaping CompletionHandler) {
+        var t_images = [UIImage]()
+        for url in urlArray {
+            Alamofire.request(url).responseImage(completionHandler: { (response) in
+                guard let image = response.result.value else { return }
+                t_images.append(image)
+                self.progressLabel?.text = "\(self.images.count)/\(urlArray.count) PHOTOS LOADED"
+                if t_images.count == urlArray.count {
+                    self.images = t_images
+                    completion (true)
+                }
+            })
+        }
+        
+    }
+    
+    func cancelAllSessions () {
+        Alamofire.SessionManager.default.session.getTasksWithCompletionHandler { (sessionDataTask, uploadData, downloadTask) in
+            sessionDataTask.forEach({$0.cancel()})
+            downloadTask.forEach({$0.cancel()})
+        }
     }
 }
+
+extension MapVC: UIViewControllerPreviewingDelegate {
+    
+    func previewingContext(_ previewingContext: UIViewControllerPreviewing, viewControllerForLocation location: CGPoint) -> UIViewController? {
+        guard let indexPath = collectionView?.indexPathForItem(at: location), let cell = collectionView?.cellForItem(at: indexPath) else { return nil }
+        let photoVC = PhotoVC()
+        photoVC.initData(withImage: images[indexPath.row])
+        photoVC.modalPresentationStyle = .custom
+        
+        previewingContext.sourceRect = cell.contentView.frame
+        return photoVC
+    }
+    
+    func previewingContext(_ previewingContext: UIViewControllerPreviewing, commit viewControllerToCommit: UIViewController) {
+        present(viewControllerToCommit, animated: true, completion: nil)
+    }
+}
+
+
+
+
+
 
